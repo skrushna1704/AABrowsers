@@ -21,7 +21,8 @@ class NavigationManager(
     private val permissionManager: PermissionManager,
     private val startPageManager: StartPageManager,
     private val uiManager: BrowserUIManager,
-    private val callbacks: NavigationCallbacks
+    private val callbacks: NavigationCallbacks,
+    private val urlSafetyCoordinator: UrlSafetyCoordinator = UrlSafetyCoordinator()
 ) {
 
     interface NavigationCallbacks {
@@ -34,15 +35,12 @@ class NavigationManager(
     }
 
     fun extractBrowsableUrl(intent: Intent?): String? {
-        val data = intent?.data
-        if (data == null) {
+        val data = intent?.data ?: return null
+        val raw = data.toString()
+        if (urlSafetyCoordinator.isBlockedScheme(raw)) {
             return null
         }
-        val scheme = data.scheme?.lowercase()
-        if (scheme == "http" || scheme == "https") {
-            return data.toString()
-        }
-        return null
+        return urlSafetyCoordinator.normalizeUrl(raw)
     }
 
     fun loadUrlFromIntent(rawUrl: String) {
@@ -60,6 +58,11 @@ class NavigationManager(
     }
 
     private fun navigateActiveTabTo(navigable: String, closeMenuAfterNavigate: Boolean) {
+        if (urlSafetyCoordinator.isBlockedScheme(navigable)) {
+            return
+        }
+        val normalizedNavigable = urlSafetyCoordinator.normalizeUrl(navigable) ?: return
+
         var targetTab = tabManager.activeTab
         if (targetTab == null) {
             targetTab = tabManager.createNewTab(activate = true)
@@ -69,25 +72,25 @@ class NavigationManager(
         }
         
         val targetWebView = targetTab.webView
-        val uri = runCatching { Uri.parse(navigable) }.getOrNull()
+        val uri = runCatching { Uri.parse(normalizedNavigable) }.getOrNull()
         if (uri == null) {
             return
         }
 
         val finishNavigation: (() -> Unit) -> Unit = { loadAction ->
-            targetTab.currentUrl = navigable
+            targetTab.currentUrl = normalizedNavigable
             targetTab.currentTitle = ""
             
             if (targetTab.id == tabManager.activeTabId) {
-                callbacks.setCurrentUrl(navigable)
+                callbacks.setCurrentUrl(normalizedNavigable)
                 callbacks.setCurrentPageTitle("")
-                if (binding.addressEdit.text?.toString() != navigable) {
-                    binding.addressEdit.setText(navigable)
-                    binding.addressEdit.setSelection(navigable.length)
+                if (binding.addressEdit.text?.toString() != normalizedNavigable) {
+                    binding.addressEdit.setText(normalizedNavigable)
+                    binding.addressEdit.setSelection(normalizedNavigable.length)
                 }
             }
             
-            BrowserPreferences.persistUrl(activity, navigable)
+            BrowserPreferences.persistUrl(activity, normalizedNavigable)
             tabManager.persistTabSession()
             callbacks.onHideStartPage()
             loadAction()
@@ -103,25 +106,29 @@ class NavigationManager(
         val scheme = uri.scheme?.lowercase()
         val host = uri.host?.lowercase()
         
-        if (scheme == "http" && !BrowserPreferences.isHostAllowedCleartext(activity, host)) {
+        val userAllowedCleartext = BrowserPreferences.isHostAllowedCleartext(activity, host)
+        val canUseCleartext = urlSafetyCoordinator.allowsCleartext(normalizedNavigable, userAllowedCleartext)
+
+        if (scheme == "http" && !canUseCleartext) {
             permissionManager.showCleartextNavigationDialog(
                 uri = uri,
                 onAllowOnce = {
                     finishNavigation {
-                        targetWebView.setTag(R.id.webview_allow_once_uri_tag, navigable)
+                        targetWebView.setTag(R.id.webview_allow_once_uri_tag, normalizedNavigable)
                         targetWebView.post { 
-                            targetWebView.loadUrl(navigable) 
+                            targetWebView.loadUrl(normalizedNavigable) 
                         }
                     }
                 },
                 onAllowHost = {
                     if (host != null) {
                         BrowserPreferences.addAllowedCleartextHost(activity, host)
+                        urlSafetyCoordinator.registerTrustedCleartextHost(host)
                     }
                     finishNavigation {
-                        targetWebView.setTag(R.id.webview_allow_once_uri_tag, navigable)
+                        targetWebView.setTag(R.id.webview_allow_once_uri_tag, normalizedNavigable)
                         targetWebView.post { 
-                            targetWebView.loadUrl(navigable) 
+                            targetWebView.loadUrl(normalizedNavigable) 
                         }
                     }
                 },
@@ -135,7 +142,20 @@ class NavigationManager(
         }
 
         finishNavigation { 
-            targetWebView.loadUrl(navigable) 
+            targetWebView.loadUrl(normalizedNavigable) 
         }
+    }
+
+    fun followRedirectForActiveTab(currentUrl: String, redirectTarget: String): Boolean {
+        urlSafetyCoordinator.recordRedirect(currentUrl, redirectTarget)
+        if (urlSafetyCoordinator.exceedsRedirectLimit()) {
+            urlSafetyCoordinator.clearRedirectChain()
+            return false
+        }
+        if (urlSafetyCoordinator.isBlockedScheme(redirectTarget)) {
+            return false
+        }
+        navigateActiveTabTo(redirectTarget, closeMenuAfterNavigate = false)
+        return true
     }
 }

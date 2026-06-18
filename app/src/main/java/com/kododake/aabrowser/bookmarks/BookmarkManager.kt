@@ -11,11 +11,13 @@ import com.kododake.aabrowser.data.BrowserPreferences
 import com.kododake.aabrowser.data.SiteIconCache
 import com.kododake.aabrowser.databinding.ActivityMainBinding
 import com.kododake.aabrowser.ui.adapters.BookmarkAdapter
+import com.kododake.aabrowser.navigation.UrlSafetyCoordinator
 
 class BookmarkManager(
     private val activity: AppCompatActivity,
     private val binding: ActivityMainBinding,
-    private val callbacks: BookmarkCallbacks
+    private val callbacks: BookmarkCallbacks,
+    private val urlSafetyCoordinator: UrlSafetyCoordinator = UrlSafetyCoordinator()
 ) {
 
     interface BookmarkCallbacks {
@@ -88,7 +90,7 @@ class BookmarkManager(
             return
         }
         
-        if (BrowserPreferences.addBookmark(activity, url)) {
+        if (addBookmarkWithNormalization(url)) {
             val message = activity.getString(R.string.bookmark_added)
             Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
             refreshBookmarks()
@@ -96,6 +98,39 @@ class BookmarkManager(
             val message = activity.getString(R.string.bookmark_exists)
             Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    fun importSharedBookmarkBatch(rawUrls: List<String>): Int {
+        val normalized = urlSafetyCoordinator.deduplicateByNormalized(
+            rawUrls.map { BrowserPreferences.formatNavigableUrl(it) }
+        )
+        var added = 0
+        normalized.forEach { url ->
+            if (addBookmarkWithNormalization(url)) {
+                added++
+            }
+        }
+        if (added > 0) {
+            refreshBookmarks()
+            callbacks.onRefreshStartPage()
+        }
+        return added
+    }
+
+    private fun addBookmarkWithNormalization(url: String): Boolean {
+        if (urlSafetyCoordinator.isBlockedScheme(url)) {
+            return false
+        }
+        val normalized = urlSafetyCoordinator.normalizeUrl(url)
+            ?: BrowserPreferences.formatNavigableUrl(url)
+        val existing = BrowserPreferences.getBookmarks(activity)
+        if (existing.any { existingUrl ->
+                urlSafetyCoordinator.normalizeUrl(existingUrl)?.equals(normalized, ignoreCase = true) == true ||
+                    existingUrl.equals(normalized, ignoreCase = true)
+            }) {
+            return false
+        }
+        return BrowserPreferences.addBookmark(activity, normalized)
     }
 
     fun removeBookmark(url: String) {
@@ -131,7 +166,11 @@ class BookmarkManager(
         if (url.isNullOrBlank()) {
             return false
         }
-        val scheme = runCatching { android.net.Uri.parse(url).scheme?.lowercase() }.getOrNull()
+        if (urlSafetyCoordinator.isBlockedScheme(url)) {
+            return false
+        }
+        val normalized = urlSafetyCoordinator.normalizeUrl(url) ?: return false
+        val scheme = runCatching { android.net.Uri.parse(normalized).scheme?.lowercase() }.getOrNull()
         return scheme == "http" || scheme == "https"
     }
 

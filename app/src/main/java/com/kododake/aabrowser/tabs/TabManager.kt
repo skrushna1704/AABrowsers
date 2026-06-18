@@ -18,6 +18,7 @@ import com.kododake.aabrowser.web.BrowserCallbacks
 import com.kododake.aabrowser.web.configureWebView
 import com.kododake.aabrowser.web.releaseCompletely
 import com.kododake.aabrowser.web.updateDesktopMode
+import com.kododake.aabrowser.navigation.UrlSafetyCoordinator
 
 data class BrowserTab(
     val id: Long,
@@ -31,7 +32,8 @@ class TabManager(
     private val activity: AppCompatActivity,
     private val binding: ActivityMainBinding,
     private val bookmarkManager: BookmarkManager,
-    private val callbacks: TabCallbacks
+    private val callbacks: TabCallbacks,
+    private val urlSafetyCoordinator: UrlSafetyCoordinator = UrlSafetyCoordinator()
 ) {
 
     interface TabCallbacks {
@@ -325,6 +327,25 @@ class TabManager(
         listOf(binding.menuScroll, binding.bookmarkManagerRoot, binding.qrCodeViewRoot, binding.checkLatestViewRoot, binding.settingsViewRoot).forEach { it.visibility = View.GONE }
         binding.tabManagerRoot.visibility = View.VISIBLE
         refreshTabs()
+    }
+
+    fun followRedirectForActiveTab(currentUrl: String, redirectTarget: String): Boolean {
+        urlSafetyCoordinator.recordRedirect(currentUrl, redirectTarget)
+        if (urlSafetyCoordinator.exceedsRedirectLimit()) {
+            urlSafetyCoordinator.clearRedirectChain()
+            Toast.makeText(activity, R.string.tab_manager_blank_title, Toast.LENGTH_SHORT).show()
+            return false
+        }
+        val normalized = urlSafetyCoordinator.normalizeUrl(redirectTarget) ?: return false
+        if (urlSafetyCoordinator.isBlockedScheme(normalized)) {
+            return false
+        }
+        callbacks.onNavigateToUrl(normalized)
+        return true
+    }
+
+    fun importSharedBookmarkBatch(urls: List<String>): Int {
+        return bookmarkManager.importSharedBookmarkBatch(urls)
     }
 
     fun hideTabManager() {
