@@ -1,0 +1,2 @@
+# id|name|desc|price|category|brand|stock|weight|rating|reviews|sold
+# Sample products are seeded in ProductRepository
